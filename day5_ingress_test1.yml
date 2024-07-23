@@ -1,0 +1,247 @@
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 Key Pair
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.40.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: VPC
+
+  IGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: NATInstance-IGW
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref IGW
+      VpcId: !Ref VPC
+
+  IGWRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: IGW-Private-RT
+
+  IGWRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref IGWRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+
+  DMZPublicSubnet0101:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.40.1.0/24
+      Tags:
+        - Key: Name
+          Value: DMZPublicSubnet0101
+
+  DMZPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: DMZ-Public-RT
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref DMZPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+  
+  
+
+  DMZPublicSNRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DMZPublicRouteTable
+      SubnetId: !Ref DMZPublicSubnet0101
+
+  InnerPublicSubnet0102:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: 10.40.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Inner-Public-SN
+
+  InnerPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Inner-Public-RT
+
+  InnerPublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref InnerPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      InstanceId: !Ref MiddleInstance
+
+  InnerPublicSNRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref InnerPublicRouteTable
+      SubnetId: !Ref InnerPublicSubnet0102
+
+  Instance1ENIEth0:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref DMZPublicSubnet0101
+      Description: Instance1 eth0
+      GroupSet:
+        - !Ref EC2SecurityGroup
+      PrivateIpAddress: 10.40.1.100
+      Tags:
+        - Key: Name
+          Value: NAT-Instance eth0
+    
+  VPCEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  VPCAssociateEIP:
+    Type: AWS::EC2::EIPAssociation
+    DependsOn: MiddleInstance
+    Properties:
+      AllocationId: !GetAtt VPCEIP.AllocationId
+      NetworkInterfaceId: !Ref Instance1ENIEth0
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access via port 80 and SSH access via port 22
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: icmp
+          FromPort: '-1'
+          ToPort: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: IAGS
+
+  MiddleInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c2d3e23e757b5d84
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SourceDestCheck: false
+      Tags:
+        - Key: Name
+          Value: MiddleInstance
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref Instance1ENIEth0
+          DeviceIndex: 0
+
+  InnerPublicClient1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-02d081c743d676996
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: InnerPublicClient1
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref InnerPublicSubnet0102
+          GroupSet:
+            - !Ref EC2SecurityGroup
+          AssociatePublicIpAddress: true
+      UserData:  # EC2 인스턴스 초기화 스크립트를 정의합니다.
+        Fn::Base64:  # Base64로 인코딩된 사용자 데이터 스크립트를 정의합니다.
+          !Sub |
+            #!/bin/bash
+            (
+            echo "qwe123"
+            echo "qwe123"
+            ) | passwd --stdin root  # 루트 계정의 비밀번호를 설정합니다.
+            sed -i "s/^PasswordAuthentication no/PasswordAuthentication yes/g" /etc/ssh/sshd_config  # SSH 비밀번호 인증을 활성화합니다.
+            sed -i "s/^#PermitRootLogin yes/PermitRootLogin yes/g" /etc/ssh/sshd_config  # 루트 로그인 허용을 활성화합니다.
+            service sshd restart  # SSH 데몬을 재시작합니다.
+
+  InnerPublicClient2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-02d081c743d676996
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: InnerPublicClient2
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref InnerPublicSubnet0102
+          GroupSet:
+            - !Ref EC2SecurityGroup
+          AssociatePublicIpAddress: true
+      UserData:  # EC2 인스턴스 초기화 스크립트를 정의합니다.
+        Fn::Base64:  # Base64로 인코딩된 사용자 데이터 스크립트를 정의합니다.
+          !Sub |
+            #!/bin/bash
+            (
+            echo "qwe123"
+            echo "qwe123"
+            ) | passwd --stdin root  # 루트 계정의 비밀번호를 설정합니다.
+            sed -i "s/^PasswordAuthentication no/PasswordAuthentication yes/g" /etc/ssh/sshd_config  # SSH 비밀번호 인증을 활성화합니다.
+            sed -i "s/^#PermitRootLogin yes/PermitRootLogin yes/g" /etc/ssh/sshd_config  # 루트 로그인 허용을 활성화합니다.
+            service sshd restart  # SSH 데몬을 재시작합니다.
+
+Outputs:
+  VPCId:
+    Description: The VPC ID
+    Value: !Ref VPC
+  DMZPublicSubnetId:
+    Description: The DMZ Public Subnet ID
+    Value: !Ref DMZPublicSubnet0101
+  InnerPublicSubnetId:
+    Description: The Inner Public Subnet ID
+    Value: !Ref InnerPublicSubnet0102
+  MiddleInstanceId:
+    Description: The Middle Instance ID
+    Value: !Ref MiddleInstance
